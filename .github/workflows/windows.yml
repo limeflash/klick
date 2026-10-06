@@ -6,6 +6,10 @@
 #                проверки службы на установленной копии, переустановка, удаление (setup-test.ps1)
 #   ks-browser — Edge в Kill Switch, VPN много раз включается и выключается (ks-browser.ps1)
 #   real       — с настоящими серверами из подписки (real-test.ps1), только при ручном запуске со ссылкой.
+#   servers    — серверы подписки под лупой: задержка, страж связи на каждом виде серверов, голое ядро,
+#                свой сайт в «Только выбранном» (servers-test.ps1), тоже только со ссылкой.
+# При ручном запуске можно собрать kl!ck из vbu00/klick как есть (main или тег выпуска, например
+# v0.4.0) — проверки при этом из этой ветки, кроме ссылок klick://add (в выпусках до 0.5 их нет).
 # Ссылка подписки не сохраняется в репозитории и скрыта в журнале.
 name: Windows
 
@@ -16,6 +20,19 @@ on:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE', 'scripts/macos/**', '.github/workflows/macos.yml']
   workflow_dispatch:
     inputs:
+      source:
+        description: Что собирать — эта ветка или vbu00/klick как есть
+        type: choice
+        options: ['branch', 'upstream']
+        default: 'branch'
+      upstream_ref:
+        description: Ветка или тег vbu00/klick для source = upstream (main, v0.4.0…)
+        required: false
+        default: 'main'
+      only:
+        description: Только этот сценарий (service, setup, ks-browser, real, servers); пусто — все
+        required: false
+        default: ''
       sub:
         description: Ссылка подписки для проверки с настоящими серверами (необязательно)
         required: false
@@ -25,7 +42,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-${{ github.ref }}
+  group: windows-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:
@@ -34,6 +51,19 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      # Проверки (sandbox\, скрипты) — из этой ветки, программа — из vbu00/klick как есть.
+      - name: Исходники kl!ck из vbu00/klick (${{ inputs.upstream_ref || 'main' }})
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.source == 'upstream' }}
+        env:
+          REF: ${{ inputs.upstream_ref || 'main' }}
+        run: |
+          git fetch --depth 1 https://github.com/vbu00/klick $env:REF
+          $app = 'crates', 'ui', 'resources', 'Cargo.toml', 'Cargo.lock', '.cargo', 'build.ps1', 'tools'
+          git rm -r -q @app
+          git checkout FETCH_HEAD -- @app
+          git log -1 --format='%h %s' FETCH_HEAD
+          Select-String -Path Cargo.toml -Pattern '^version'
 
       - uses: actions/setup-node@v4
         with:
@@ -126,7 +156,7 @@ jobs:
       fail-fast: false
       matrix:
         runner: [windows-2022, windows-2025]
-        scenario: [service, setup, ks-browser, real]
+        scenario: [service, setup, ks-browser, real, servers]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -154,23 +184,28 @@ jobs:
         with:
           node-version: 22
 
+      # real и servers — только со ссылкой; only — один сценарий из всех.
       - name: Сценарий ${{ matrix.scenario }}
-        if: matrix.scenario != 'real' || (github.event_name == 'workflow_dispatch' && inputs.sub != '')
+        if: >-
+          (inputs.only == '' || inputs.only == matrix.scenario) &&
+          ((matrix.scenario != 'real' && matrix.scenario != 'servers') || (github.event_name == 'workflow_dispatch' && inputs.sub != ''))
         shell: pwsh
         run: |
-          $map = @{ service = 'run'; setup = 'setup'; 'ks-browser' = 'ks-browser'; real = 'real' }
+          $map = @{ service = 'run'; setup = 'setup'; 'ks-browser' = 'ks-browser'; real = 'real'; servers = 'servers' }
           $old = Get-ChildItem old -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ('${{ matrix.scenario }}' -eq 'real') {
+          if ('${{ matrix.scenario }}' -in 'real', 'servers') {
             $env:KLICK_TEST_SUB = (Get-Content $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json).inputs.sub
           }
+          # Сборка vbu00/klick как есть — без ссылок klick://add: их проверки пропускаются.
+          if ('${{ inputs.source }}' -eq 'upstream') { $env:KLICK_NO_DEEPLINK = '1' }
           $a = @{ Scenario = $map['${{ matrix.scenario }}']; Build = (Resolve-Path build).Path }
           if ($old) { $a.Old = $old.FullName }
           & sandbox\ci.ps1 @a
           exit $LASTEXITCODE
 
-      # Отчёты и журнал службы — для разбора. Кроме проверки с подпиской: артефакты видны всем с доступом к репозиторию.
+      # Отчёты и журнал службы — для разбора. Кроме проверок с подпиской: артефакты видны всем с доступом к репозиторию.
       - uses: actions/upload-artifact@v4
-        if: always() && matrix.scenario != 'real'
+        if: always() && matrix.scenario != 'real' && matrix.scenario != 'servers'
         with:
           name: results-${{ matrix.runner }}-${{ matrix.scenario }}
           path: C:\klick\results
