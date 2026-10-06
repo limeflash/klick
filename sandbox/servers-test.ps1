@@ -1,11 +1,13 @@
 # Серверы подписки под лупой — на раннере CI (sandbox\ci.ps1) или тестовом компьютере. Ссылка — в
 # переменной KLICK_TEST_SUB; в отчёт идут только имена серверов, задержки, коды и состояния, адреса
 # серверов в строках ядра заменяются на <адрес>.
-#   1. Задержка всех серверов при выключенном VPN (проверочное ядро).
-#   2. Голое ядро mihomo с теми же серверами: замер, как у kl!ck (группа, 5 с, unified-delay), и
-#      с другими настройками — чтобы отличить беду протокола или ядра от логики kl!ck.
-#   3. VPN (TUN) на каждом виде серверов по несколько минут: открываются ли страницы, что делает страж
-#      связи (переподключения, «Сервер не отвечает», перезапуски ядра), задержка при включённом VPN.
+#   1. Голое ядро mihomo с теми же серверами: замер, как у kl!ck (группа, 5 с, unified-delay), и по
+#      одному серверу.
+#   2. Голое ядро под нагрузкой на самом быстром wireguard и hysteria2: просто порт, без remote-dns-resolve,
+#      с DNS и сниффером как у kl!ck, TUN как у kl!ck. Так видно, чья беда — протокола, ядра или настроек kl!ck.
+#   3. kl!ck: задержка при выключенном VPN; VPN (TUN) на тех же двух серверах — открываются ли страницы,
+#      что делает страж связи (переподключения, «Сервер не отвечает», перезапуски ядра), задержка при
+#      включённом VPN.
 #   4. «Только выбранное» и свой сайт colab.research.google.com: какие соединения страницы Colab
 #      идут через VPN, а какие напрямую.
 # Меняет настройки сети — только на тестовой машине.
@@ -24,7 +26,7 @@ Set-Content -Path $report -Value '' -Encoding UTF8
 $script:fails = 0
 $sub = $env:KLICK_TEST_SUB
 # Сколько держать VPN на каждом сервере: страж проверяет связь раз в 30 с.
-$hold = if ($env:KLICK_HOLD_SECONDS) { [int]$env:KLICK_HOLD_SECONDS } else { 150 }
+$hold = if ($env:KLICK_HOLD_SECONDS) { [int]$env:KLICK_HOLD_SECONDS } else { 90 }
 
 function Log([string]$m) { Add-Content -Path $report -Value ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $m) -Encoding UTF8 }
 function Check([string]$name, [bool]$ok, [string]$detail = '') {
@@ -73,41 +75,75 @@ function BareJson([string]$u, [int]$timeoutSec = 10) {
     $r = Invoke-WebRequest -UseBasicParsing -Headers $bareHead $u -TimeoutSec $timeoutSec
     [Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray()) | ConvertFrom-Json
 }
-function BareConfig([bool]$unified) {
+# Варианты голого ядра: $klickDns — DNS и сниффер как у kl!ck (имена сайтов спрашиваются через
+# сервер), $tun — перехват всей системы, как в kl!ck; $servers — файл серверов.
+function BareConfig([bool]$unified = $true, [string]$level = 'warning', [bool]$klickDns = $false, [bool]$tun = $false, [string]$servers = 'servers.yaml') {
+    $ns = if ($klickDns) { '["https://1.1.1.1/dns-query#klick-vpn", "https://8.8.8.8/dns-query#klick-vpn"]' } else { '["tls://77.88.8.8:853", "77.88.8.8"]' }
+    $sniffer = if (-not $klickDns) { '' } else { @"
+sniffer:
+  enable: true
+  force-dns-mapping: true
+  parse-pure-ip: true
+  override-destination: false
+  sniff:
+    TLS: { ports: [443, 8443], override-destination: true }
+    HTTP: { ports: [80, "8080-8880"], override-destination: true }
+    QUIC: { ports: [443, 8443], override-destination: true }
+"@ }
+    $tunBlock = if (-not $tun) { '' } else { @"
+tun:
+  enable: true
+  stack: gvisor
+  device: bare
+  auto-route: true
+  auto-detect-interface: true
+  strict-route: true
+  dns-hijack: ["any:53", "tcp://any:53"]
+"@ }
 @"
 mode: rule
-log-level: warning
+log-level: $level
 ipv6: true
 unified-delay: $(if ($unified) { 'true' } else { 'false' })
 tcp-concurrent: true
+find-process-mode: always
 geo-auto-update: false
 geodata-mode: false
 external-controller: 127.0.0.1:19190
 secret: diag
+mixed-port: 19180
 profile: { store-selected: false, store-fake-ip: false }
 proxy-providers:
-  klick-servers: { type: file, path: servers.yaml, health-check: { enable: false } }
+  klick-servers: { type: file, path: $servers, health-check: { enable: false } }
 proxy-groups:
   - { name: klick-vpn, type: select, use: [klick-servers] }
 rules:
-  - MATCH,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,168.63.129.16/32,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  - MATCH,klick-vpn
 dns:
   enable: true
   ipv6: false
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
   default-nameserver: [77.88.8.8, 1.1.1.1]
-  nameserver: ["tls://77.88.8.8:853", "77.88.8.8"]
+  nameserver: $ns
+  direct-nameserver: ["tls://77.88.8.8:853", "77.88.8.8"]
   proxy-server-nameserver: ["tls://77.88.8.8:853", "https://1.1.1.1/dns-query", "77.88.8.8"]
+$sniffer
+$tunBlock
 "@
 }
-function BareStart([bool]$unified) {
-    Set-Content "$bare\config.yaml" (BareConfig $unified) -Encoding UTF8
+function BareStart([bool]$unified = $true, [string]$level = 'warning', [bool]$klickDns = $false, [bool]$tun = $false, [string]$servers = 'servers.yaml') {
+    BareStop
+    Set-Content "$bare\config.yaml" (BareConfig $unified $level $klickDns $tun $servers) -Encoding UTF8
     $script:bareProc = Start-Process $mihomo -ArgumentList '-d', $bare, '-f', "$bare\config.yaml" -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput "$bare\core.out" -RedirectStandardError "$bare\core.err"
-    $end = (Get-Date).AddSeconds(10)
+    $end = (Get-Date).AddSeconds(15)
     while ((Get-Date) -lt $end) {
-        try { BareJson "$bareUrl/version" 2 | Out-Null; return $true } catch { Start-Sleep -Milliseconds 300 }
+        try { BareJson "$bareUrl/version" 2 | Out-Null; Start-Sleep 2; return $true } catch { Start-Sleep -Milliseconds 300 }
     }
     $false
 }
@@ -129,6 +165,34 @@ function BareWarnings {
     $lines = Get-Content "$bare\core.out", "$bare\core.err" -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_ -match 'level=(warning|error)' }
     $uniq = @($lines | ForEach-Object { Scrub (($_ -replace '^.*msg="', '') -replace '"\s*$', '') } | Group-Object | Sort-Object Count -Descending | Select-Object -First 8)
     foreach ($g in $uniq) { Log ("      ядро ({0}×): {1}" -f $g.Count, $g.Name) }
+}
+
+# Голое ядро под нагрузкой: запрос каждые 2 с и проверка, как у стража kl!ck, раз в 30 с; по строкам
+# WireGuard видно, когда туннель замолкает («не слышно сервер») и сколько было рукопожатий.
+function BareLoad([string]$label, [string]$server, [int]$seconds, [bool]$viaTun = $false) {
+    $body = [Text.Encoding]::UTF8.GetBytes((@{ name = $server } | ConvertTo-Json -Compress))
+    try { Invoke-WebRequest -UseBasicParsing -Method Put -Headers $bareHead -ContentType 'application/json' -Body $body "$bareUrl/proxies/klick-vpn" -TimeoutSec 5 | Out-Null }
+    catch { Log ("    {0}: сервер не выбран: {1}" -f $label, (Scrub $_.Exception.Message)); return }
+    $via = if ($viaTun) { @() } else { @('-x', 'http://127.0.0.1:19180') }
+    $ok = 0; $bad = 0; $pOk = 0; $pBad = 0; $slow = 0
+    $probe = "$bareUrl/proxies/klick-vpn/delay?url=$([uri]::EscapeDataString('https://www.gstatic.com/generate_204'))&timeout=5000"
+    $end = (Get-Date).AddSeconds($seconds)
+    $nextProbe = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $end) {
+        $r = & curl.exe -s -o NUL -w '%{http_code} %{time_total}' --max-time 8 @via 'https://www.gstatic.com/generate_204' 2>$null
+        $code, $time = "$r".Trim() -split ' '
+        if ($code -eq '204') { $ok++; if ([double]::Parse($time, [Globalization.CultureInfo]::InvariantCulture) -gt 2) { $slow++ } } else { $bad++ }
+        if ((Get-Date) -ge $nextProbe) {
+            try { BareJson $probe 10 | Out-Null; $pOk++ } catch { $pBad++ }
+            $nextProbe = (Get-Date).AddSeconds(30)
+        }
+        Start-Sleep 2
+    }
+    $log = Get-Content "$bare\core.out" -Encoding UTF8 -ErrorAction SilentlyContinue
+    $n = { param($re) @($log | Where-Object { $_ -match $re }).Count }
+    Log ("    {0}: запросы {1} из {2} (дольше 2 с: {3}); проверки, как у стража: {4} из {5}; WireGuard: «не слышно сервер» {6}, рукопожатий {7}, без ответа {8}" -f `
+        $label, $ok, ($ok + $bad), $slow, $pOk, ($pOk + $pBad), (& $n 'stopped hearing back'), (& $n 'Sending handshake initiation'), (& $n 'Handshake did not complete'))
+    @{ ok = $ok; total = ($ok + $bad); probes = $pOk; ptotal = ($pOk + $pBad) }
 }
 
 # ── VPN на одном сервере несколько минут ─────────────────────────────────────
@@ -187,33 +251,47 @@ try {
     New-Item -ItemType Directory -Force $bare | Out-Null
     & curl.exe -s -f -A 'mihomo/1.19.31' --max-time 30 -o "$bare\servers.yaml" $sub 2>$null
     Check 'голое ядро: подписка скачана' ((Test-Path "$bare\servers.yaml") -and (Get-Item "$bare\servers.yaml").Length -gt 0)
-    if (BareStart $true) {
-        Log ("--- голое ядро {0}, unified-delay: true" -f (BareJson "$bareUrl/version").version)
-        Start-Sleep 2
+    # Те же серверы, но адреса сайтов WireGuard ищет у себя, а не через туннель.
+    $local = (Get-Content "$bare\servers.yaml" -Raw -Encoding UTF8) -replace 'remote-dns-resolve:\s*true', 'remote-dns-resolve: false'
+    [IO.File]::WriteAllText("$bare\servers-local-dns.yaml", $local, (New-Object Text.UTF8Encoding $false))
+    $script:fastest = @{}
+    if (BareStart) {
+        Log ("--- голое ядро {0}" -f (BareJson "$bareUrl/version").version)
         Log '    группа, gstatic, 5 с (как kl!ck):'
         $asKlick = BareGroup 'https://www.gstatic.com/generate_204' 5000
-        Log '    группа, gstatic, 5 с, второй раз (соединения уже открыты):'
+        Log '    группа, второй раз:'
         $asKlick2 = BareGroup 'https://www.gstatic.com/generate_204' 5000
-        Log '    группа, gstatic, 15 с:'
-        $long = BareGroup 'https://www.gstatic.com/generate_204' 15000
-        Log '    группа, cp.cloudflare.com, 5 с:'
-        BareGroup 'http://cp.cloudflare.com/generate_204' 5000 | Out-Null
         Log '    по одному, gstatic, 10 с:'
         $prov = BareJson "$bareUrl/providers/proxies/klick-servers"
-        foreach ($p in $prov.proxies) { Log ("      {0,-26} {1,-10} {2}" -f $p.name, $p.type, (BareOne $p.name 'https://www.gstatic.com/generate_204' 10000)) }
-        BareWarnings
-        BareStop
-        Remove-Item "$bare\core.out", "$bare\core.err" -ErrorAction SilentlyContinue
-        if (BareStart $false) {
-            Log '--- голое ядро, unified-delay: false'
-            Start-Sleep 2
-            Log '    группа, gstatic, 5 с:'
-            BareGroup 'https://www.gstatic.com/generate_204' 5000 | Out-Null
-            BareWarnings
-            BareStop
+        foreach ($p in $prov.proxies) {
+            $d = BareOne $p.name 'https://www.gstatic.com/generate_204' 10000
+            Log ("      {0,-26} {1,-10} {2}" -f $p.name, $p.type, $d)
+            if ($d -match '^(\d+) мс$') {
+                $ms = [int]$Matches[1]; $k = "$($p.type)".ToLower()
+                if (-not $script:fastest[$k] -or $ms -lt $script:fastest[$k].ms) { $script:fastest[$k] = @{ name = $p.name; ms = $ms } }
+            }
         }
+        BareWarnings
         Check 'голое ядро: задержка измерена хотя бы у одного (как kl!ck)' (($asKlick + $asKlick2) -gt 0)
     } else { Check 'голое ядро запустилось' $false }
+    $hy = if ($script:fastest['hysteria2']) { $script:fastest['hysteria2'].name } else { $null }
+    $wg = if ($script:fastest['wireguard']) { $script:fastest['wireguard'].name } else { $null }
+    Log ("--- голое ядро под нагрузкой, {0} с на вариант: wireguard «{1}», hysteria2 «{2}»" -f $hold, $wg, $hy)
+    $variants = @(
+        @{ label = 'hysteria2, порт'; server = $hy; klickDns = $false; tun = $false; servers = 'servers.yaml' },
+        @{ label = 'wireguard, порт'; server = $wg; klickDns = $false; tun = $false; servers = 'servers.yaml' },
+        @{ label = 'wireguard, порт, remote-dns-resolve: false'; server = $wg; klickDns = $false; tun = $false; servers = 'servers-local-dns.yaml' },
+        @{ label = 'wireguard, порт, DNS и сниффер как у kl!ck'; server = $wg; klickDns = $true; tun = $false; servers = 'servers.yaml' },
+        @{ label = 'wireguard, TUN как у kl!ck'; server = $wg; klickDns = $true; tun = $true; servers = 'servers.yaml' },
+        @{ label = 'wireguard, TUN как у kl!ck, remote-dns-resolve: false'; server = $wg; klickDns = $true; tun = $true; servers = 'servers-local-dns.yaml' },
+        @{ label = 'hysteria2, TUN как у kl!ck'; server = $hy; klickDns = $true; tun = $true; servers = 'servers.yaml' }
+    )
+    foreach ($v in $variants) {
+        if (-not $v.server) { continue }
+        if (BareStart $true 'debug' $v.klickDns $v.tun $v.servers) { BareLoad $v.label $v.server $hold $v.tun | Out-Null }
+        else { Log ("    {0}: ядро не запустилось" -f $v.label); BareWarnings }
+    }
+    BareStop
     Remove-Item $bare -Recurse -Force -ErrorAction SilentlyContinue
 
     # kl!ck
@@ -230,18 +308,9 @@ try {
     $servers = @(KlickJson servers)
     Log ("    серверов: {0} · {1}" -f $servers.Count, ((@($servers | ForEach-Object { $_.kind }) | Sort-Object -Unique) -join ', '))
     $off1 = Latency 'VPN выключен'
-    $off2 = Latency 'VPN выключен, второй раз'
-    $answered = @(@($off1) + @($off2) | Where-Object { $_.delay -gt 0 } | ForEach-Object { $_.name } | Sort-Object -Unique)
-    Check 'VPN выключен: задержка измерена хотя бы у одного' ($answered.Count -gt 0)
-
-    # Серверы для TUN: первый каждого вида, последний wireguard (у Mistgate — другой вариант AmneziaWG) и самый быстрый.
-    $pick = @()
-    foreach ($kind in @($servers | ForEach-Object { $_.kind } | Select-Object -Unique)) { $pick += @($servers | Where-Object kind -eq $kind | Select-Object -First 1).name }
-    $wg = @($servers | Where-Object kind -eq 'wireguard')
-    if ($wg.Count -gt 1) { $pick += $wg[-1].name }
-    $fastest = @(@($off1) + @($off2) | Where-Object { $_.delay -gt 0 } | Sort-Object delay | Select-Object -First 1)
-    if ($fastest) { $pick += $fastest[0].name }
-    $pick = @($pick | Select-Object -Unique)
+    Check 'VPN выключен: задержка измерена хотя бы у одного' (@($off1 | Where-Object { $_.delay -gt 0 }).Count -gt 0)
+    $pick = @(@($hy, $wg) | Where-Object { $_ })
+    if (-not $pick) { $pick = @($servers[0].name) }
     Log ("    VPN проверю на: {0}" -f ($pick -join ' · '))
 
     KlickCli mode tun | Out-Null
@@ -250,7 +319,7 @@ try {
 
     # «Только выбранное» + свой сайт: куда идут соединения страницы Colab.
     Log '--- «Только выбранное», свой сайт colab.research.google.com, TUN'
-    $best = if ($fastest) { $fastest[0].name } else { $pick[0] }
+    $best = $pick[0]
     KlickCli server $best | Out-Null
     KlickCli routing selected | Out-Null
     Log ("    список: " + ((KlickCli list add selected domain colab.research.google.com vpn) -replace '\s+', ' '))
