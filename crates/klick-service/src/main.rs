@@ -3,6 +3,7 @@
 
 mod core;
 mod engine;
+mod hwid;
 mod ipcheck;
 mod logring;
 mod paths;

@@ -213,6 +213,25 @@ pub fn os_name() -> String {
     [Some(name.to_string()), reg_string(key, "DisplayVersion"), Some(arch.to_string())].into_iter().flatten().collect::<Vec<_>>().join(" · ")
 }
 
+/// MachineGuid — постоянный ID установки Windows: меняется только при переустановке системы.
+pub fn machine_id() -> Option<Vec<u8>> {
+    reg_string(r"SOFTWARE\Microsoft\Cryptography", "MachineGuid").map(String::into_bytes)
+}
+
+/// Для заголовков подписки: («Windows», «11 24H2»).
+pub fn os_short() -> (String, String) {
+    let key = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+    let build: u32 = reg_string(key, "CurrentBuildNumber").and_then(|b| b.parse().ok()).unwrap_or(0);
+    let major = if build >= 22000 { Some("11".to_string()) } else if build > 0 { Some("10".to_string()) } else { None };
+    let version = [major, reg_string(key, "DisplayVersion")].into_iter().flatten().collect::<Vec<_>>().join(" ");
+    ("Windows".into(), version)
+}
+
+/// Имя компьютера — им устройство и подписано в панели.
+pub fn device_name() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok().filter(|s| !s.is_empty())
+}
+
 fn reg_string(key: &str, value: &str) -> Option<String> {
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};

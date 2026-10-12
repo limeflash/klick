@@ -28,7 +28,12 @@ pub async fn fetch(url: &str, via_port: Option<u16>) -> Result<Fetched, ErrorInf
         None => builder.no_proxy(),
     };
     let client = builder.build().map_err(|_| ErrorInfo::new("sub.fetch_failed"))?;
-    let res = client.get(sub::fetch_url(url)).send().await.map_err(|e| {
+    let target = sub::fetch_url(url);
+    let mut req = client.get(&target);
+    for (name, value) in crate::hwid::headers(&target) {
+        req = req.header(name, value);
+    }
+    let res = req.send().await.map_err(|e| {
         tracing::warn!("подписка не скачалась: {}", without_url(&e));
         ErrorInfo::with("sub.fetch_failed", json!({ "reason": if e.is_timeout() { "timeout" } else if e.is_connect() { "connect" } else { "other" } }))
     })?;

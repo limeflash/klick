@@ -203,6 +203,37 @@ fn machine_key() -> Result<[u8; 32]> {
     Ok(h.finalize().into())
 }
 
+/// Постоянный ID компьютера (тот же, что у ключа шифрования секретов).
+pub fn machine_id() -> Option<Vec<u8>> {
+    host_uuid()
+}
+
+/// Для заголовков подписки: («macOS», «15.1»).
+#[cfg(target_os = "macos")]
+pub fn os_short() -> (String, String) {
+    ("macOS".into(), sysctl_string("kern.osproductversion").unwrap_or_default())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn os_short() -> (String, String) {
+    let version = std::fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("VERSION_ID=").map(|v| v.trim_matches('"').to_string())));
+    ("Linux".into(), version.unwrap_or_default())
+}
+
+/// Имя компьютера — им устройство и подписано в панели.
+pub fn device_name() -> Option<String> {
+    let mut buf = [0u8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let name = String::from_utf8_lossy(&buf[..len]).trim_end_matches(".local").to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 #[cfg(target_os = "macos")]
 fn host_uuid() -> Option<Vec<u8>> {
     let mut id = [0u8; 16];
