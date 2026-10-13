@@ -18,6 +18,8 @@ mod browsers;
 #[cfg(windows)]
 mod killswitch;
 #[cfg(windows)]
+mod kswatch;
+#[cfg(windows)]
 mod neighbors;
 #[cfg(windows)]
 mod netwatch;

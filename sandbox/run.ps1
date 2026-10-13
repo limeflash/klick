@@ -240,6 +240,20 @@ try {
     Start-Sleep 1
     $ksBack = Http 'C:\kstest\curl.exe'
     Check 'Kill Switch: включённая снова программа без сети' ($ksBack -eq '000') "код $ksBack"
+    # Программа обновилась в новую папку (так делают Roblox, Discord): новый exe закрыт сразу, а не через 10 минут.
+    New-Item -ItemType Directory -Force 'C:\kstest\version-2' | Out-Null
+    Copy-Item "$env:WINDIR\System32\curl.exe" 'C:\kstest\version-2\curl.exe' -Force
+    Start-Sleep 2
+    $ksNew = Http 'C:\kstest\version-2\curl.exe'
+    Check 'Kill Switch: новая версия программы без сети за 2 с' ($ksNew -eq '000') "код $ksNew"
+    # Установщик собрал папку версии в другом месте и переложил целиком.
+    New-Item -ItemType Directory -Force 'C:\kstage' | Out-Null
+    Copy-Item "$env:WINDIR\System32\curl.exe" 'C:\kstage\curl.exe' -Force
+    Move-Item 'C:\kstage' 'C:\kstest\version-3'
+    Start-Sleep 2
+    $ksMoved = Http 'C:\kstest\version-3\curl.exe'
+    Check 'Kill Switch: переложенная целиком папка версии без сети за 2 с' ($ksMoved -eq '000') "код $ksMoved"
+    Remove-Item 'C:\kstest\version-2', 'C:\kstest\version-3' -Recurse -Force
     $sysOff = Http 'curl.exe'
     Check 'Kill Switch не мешает остальным программам' ($sysOff -eq '204') "код $sysOff"
     $lan = Http 'C:\kstest\curl.exe' 'https://www.gstatic.com/generate_204' @('--socks5-hostname', "${ip}:1080")

@@ -67,6 +67,9 @@ pub enum Msg {
     /// Windows: раз в 5 с — какие программы из Kill Switch фильтры не пустили мимо прокси.
     #[cfg(windows)]
     KsDrops,
+    /// Windows: в папке программы Kill Switch появился exe или папка — программа обновилась.
+    #[cfg(windows)]
+    KsFolderChanged,
 }
 
 #[derive(Clone)]
@@ -187,6 +190,10 @@ pub struct Engine {
     no_proxy: HashSet<String>,
     #[cfg(windows)]
     drops_since: std::time::SystemTime,
+    #[cfg(windows)]
+    ks_watch: Option<crate::kswatch::KsWatch>,
+    /// Когда пересмотреть папки Kill Switch: изменения в папке идут пачкой, проверяем раз после неё.
+    ks_rescan_at: Option<Instant>,
     core_version: Option<String>,
     _netwatch: Option<NetWatch>,
     events: broadcast::Sender<Event>,
@@ -379,6 +386,9 @@ pub fn spawn(paths: Paths, profile: Profile) -> anyhow::Result<(EngineHandle, to
         no_proxy: HashSet::new(),
         #[cfg(windows)]
         drops_since: std::time::SystemTime::now(),
+        #[cfg(windows)]
+        ks_watch: crate::kswatch::KsWatch::new(tx.clone()).map_err(|e| tracing::warn!("Kill Switch: слежка за папками не запустилась: {e}")).ok(),
+        ks_rescan_at: None,
         core_version: None,
         _netwatch: netwatch,
         events: events.clone(),
@@ -490,6 +500,7 @@ impl Engine {
             let deadline = self.guard_deadline();
             let sleep_to = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
             let maintenance_at = self.next_maintenance;
+            let rescan_at = self.ks_rescan_at;
             tokio::select! {
                 // Команды окна — первыми: обслуживание и страж подождут, «Отключить» — нет.
                 biased;
@@ -508,6 +519,11 @@ impl Engine {
                         Msg::RetryLeftoverProxy => self.clear_leftover_proxy(),
                         #[cfg(windows)]
                         Msg::KsDrops => self.ks_drops().await,
+                        // Не сразу: установщик пишет файлы пачкой — проверяем, когда он закончит.
+                        #[cfg(windows)]
+                        Msg::KsFolderChanged => {
+                            self.ks_rescan_at.get_or_insert_with(|| Instant::now() + Duration::from_millis(300));
+                        }
                         Msg::CoreExited { generation, code } => self.on_core_exit(generation, code).await,
                         Msg::Probed { generation, retry, ok } => {
                             if self.probing == Some(generation) {
@@ -534,6 +550,10 @@ impl Engine {
                     }
                 }
                 _ = tokio::time::sleep_until(maintenance_at) => self.maintenance().await,
+                _ = tokio::time::sleep_until(rescan_at.unwrap_or(maintenance_at)), if rescan_at.is_some() => {
+                    self.ks_rescan_at = None;
+                    self.check_killswitch_programs().await;
+                }
                 _ = tokio::time::sleep_until(sleep_to), if deadline.is_some() => self.on_guard().await,
             }
         }
@@ -1524,7 +1544,13 @@ impl Engine {
         #[cfg(unix)]
         self.sync_ks_core().await;
         #[cfg(windows)]
-        self.apply_wfp(&exes);
+        {
+            self.apply_wfp(&exes);
+            let folders = self.ks_folders();
+            if let Some(w) = &mut self.ks_watch {
+                w.set(folders);
+            }
+        }
     }
 
     /// Новый сеанс: что было заблокировано раньше, к нему не относится.
@@ -1688,7 +1714,7 @@ impl Engine {
     /// Какие программы закрывает страж: все включённые программы Kill Switch — и те, которых сейчас
     /// нет на диске. Программа на внешнем диске или посреди обновления пропадает ненадолго, и снять
     /// на это время защиту значило бы выпустить её напрямую, как только она появится снова.
-    #[cfg(unix)]
+    /// Windows: за этими же папками следит KsWatch.
     fn ks_folders(&self) -> Vec<String> {
         let ks = &self.settings.kill_switch;
         if !ks.enabled {
