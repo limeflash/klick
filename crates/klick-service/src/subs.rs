@@ -7,8 +7,9 @@ use serde_json::json;
 use std::time::Duration;
 use reqwest::Url;
 
-/// Так панели вроде Remnawave и Marzban отдают конфиг в формате mihomo.
-pub const USER_AGENT: &str = "mihomo/1.19.33";
+/// Так панели вроде Remnawave и Marzban отдают конфиг в формате mihomo: они смотрят на начало строки.
+/// `klick/<версия>` следом — чтобы панель видела устройство как kl!ck, а не как голый mihomo.
+pub const USER_AGENT: &str = concat!("mihomo/1.19.33 klick/", env!("CARGO_PKG_VERSION"));
 /// Подписка — десятки килобайт; больше — не подписка, а память службы не резиновая.
 const BODY_LIMIT: usize = 16 << 20;
 
@@ -153,7 +154,14 @@ fn without_url(e: &reqwest::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_probe_report, report_url};
+    use super::{parse_probe_report, report_url, USER_AGENT};
+
+    #[test]
+    fn user_agent_starts_with_mihomo_and_names_klick() {
+        // Панели выбирают формат по началу строки — mihomo должен оставаться первым.
+        assert!(USER_AGENT.starts_with("mihomo/"));
+        assert!(USER_AGENT.ends_with(&format!(" klick/{}", env!("CARGO_PKG_VERSION"))));
+    }
 
     #[test]
     fn report_url_uses_only_subscription_path() {
